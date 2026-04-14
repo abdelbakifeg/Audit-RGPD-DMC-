@@ -777,6 +777,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 
 # ─── Serveur de fichiers statiques (interface web) ────────────────────────────
+import logging
+logging.warning(f"STATIC_DIR = {STATIC_DIR} | exists = {STATIC_DIR.exists()}")
 
 if STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
