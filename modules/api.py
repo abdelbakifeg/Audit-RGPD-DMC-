@@ -780,17 +780,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 import logging
 logging.warning(f"STATIC_DIR = {STATIC_DIR} | exists = {STATIC_DIR.exists()}")
 
-if STATIC_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
-else:
-    @app.get("/")
-    async def root():
-        return JSONResponse({
-            "message": "Dékuple DMC — API Audit RGPD",
-            "docs":    "/api/docs",
-            "health":  "/api/health",
-        })
+from fastapi.responses import HTMLResponse
 
+@app.get("/")
+async def root():
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return HTMLResponse(content=index_path.read_text(encoding="utf-8"))
+    return JSONResponse({"message": "Dékuple DMC", "docs": "/api/docs"})
 
 # ─── Lancement ────────────────────────────────────────────────────────────────
 
