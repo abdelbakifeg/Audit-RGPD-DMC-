@@ -778,7 +778,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 # ─── Serveur de fichiers statiques (interface web) ────────────────────────────
 
-if STATIC_DIR = Path(__file__).parent.parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 else:
     @app.get("/")
     async def root():
