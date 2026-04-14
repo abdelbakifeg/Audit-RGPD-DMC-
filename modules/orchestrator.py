@@ -4,18 +4,10 @@ Module 4 — Orchestrateur
 Point d'entrée unique pour auditer une URL.
 Assemble M1 + M2 + M3 et décide automatiquement
 quelle route prendre selon le CMP détecté.
-
-Pipeline de décision :
-  URL → M1 détection CMP
-       ├─ Didomi/OneTrust + clé API → M2 extraction directe
-       ├─ Autre CMP connu           → M3 Playwright
-       ├─ Aucun CMP                 → M3 Playwright
-       └─ URL morte / erreur        → marqué ERREUR
-
-Sortie : AuditResult unifié, indépendant de la route empruntée.
 """
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -30,56 +22,43 @@ from modules.playwright_navigator import navigate_and_extract, PlaywrightResult
 # ─── Statuts possibles pour une URL ──────────────────────────────────────────
 
 class AuditStatus(str, Enum):
-    CONFORME      = "conforme"       # Dékuple trouvé au bon endroit
-    NON_CONFORME  = "non_conforme"   # URL valide mais Dékuple absent
-    A_VERIFIER    = "a_verifier"     # Résultat ambigu, vérification manuelle
-    ERREUR        = "erreur"         # URL morte ou inaccessible
-    TIMEOUT       = "timeout"        # Délai dépassé
+    CONFORME      = "conforme"
+    NON_CONFORME  = "non_conforme"
+    A_VERIFIER    = "a_verifier"
+    ERREUR        = "erreur"
+    TIMEOUT       = "timeout"
 
 
 class AuditRoute(str, Enum):
-    API_DIDOMI   = "api_didomi"      # M2 — API JSON directe
-    API_ONETRUST = "api_onetrust"    # M2 variante OneTrust
-    PLAYWRIGHT   = "playwright"      # M3 — navigateur headless
-    FETCH_ONLY   = "fetch_only"      # fetch statique suffit (HTML simple)
-    ECHEC        = "echec"           # impossible d'accéder à l'URL
+    API_DIDOMI   = "api_didomi"
+    API_ONETRUST = "api_onetrust"
+    PLAYWRIGHT   = "playwright"
+    FETCH_ONLY   = "fetch_only"
+    ECHEC        = "echec"
 
 
 # ─── Résultat unifié ──────────────────────────────────────────────────────────
 
 @dataclass
 class AuditResult:
-    # Identification
     url: str
     audited_at: str
-
-    # Statut global
     status: AuditStatus
     route: AuditRoute
-
-    # Dékuple DMC
     dekuple_found: bool = False
     dekuple_locations: list[str] = field(default_factory=list)
-    dekuple_name: Optional[str] = None          # nom exact trouvé
-    dekuple_policy_url: Optional[str] = None    # URL politique Dékuple
-
-    # Partenaires (si CMP avec liste)
+    dekuple_name: Optional[str] = None
+    dekuple_policy_url: Optional[str] = None
     partners_total: int = 0
     partners_list: list[str] = field(default_factory=list)
-
-    # CMP détecté
     cmp_type: str = "unknown"
     cmp_api_key: Optional[str] = None
-
-    # Preuves
     screenshots: list[str] = field(default_factory=list)
     links_analyzed: list[str] = field(default_factory=list)
-    text_extract: str = ""            # extrait du texte analysé (500 chars)
-
-    # Méta
+    text_extract: str = ""
     duration_seconds: float = 0.0
     error: Optional[str] = None
-    notes: str = ""                   # observations pour vérification manuelle
+    notes: str = ""
 
 
 # ─── Logique de décision statut ───────────────────────────────────────────────
@@ -90,41 +69,29 @@ def _determine_status(
     error: Optional[str],
     cmp_type: CMPType,
 ) -> AuditStatus:
-    """
-    Règle métier pour le statut final.
-    On est strict : si on ne peut pas conclure avec certitude → A_VERIFIER.
-    """
     if error or route == AuditRoute.ECHEC:
         return AuditStatus.ERREUR
-
     if dekuple_found:
         return AuditStatus.CONFORME
-
-    # Pas trouvé mais on a eu accès complet à la liste partenaires via API
     if route in (AuditRoute.API_DIDOMI, AuditRoute.API_ONETRUST):
-        return AuditStatus.NON_CONFORME  # certitude : liste complète analysée
-
-    # Pas trouvé via Playwright — possible que le contenu soit inaccessible
+        return AuditStatus.NON_CONFORME
     if route == AuditRoute.PLAYWRIGHT:
         return AuditStatus.NON_CONFORME
-
     return AuditStatus.A_VERIFIER
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
-async def _route_api_didomi(
-    cmp: CMPResult,
-    url: str,
-) -> tuple[AuditRoute, dict]:
-    """Route M2 : extraction via API JSON Didomi."""
+async def _route_api_didomi(cmp: CMPResult, url: str) -> tuple[AuditRoute, dict]:
+    logging.warning(f"[AUDIT] Route Didomi API pour {url}")
     result: DidomiResult = await extract_didomi(cmp.api_endpoint)
 
     if not result.success:
-        # Fallback vers Playwright si l'API échoue
+        logging.warning(f"[AUDIT] Didomi API échouée : {result.error} — fallback Playwright")
         return AuditRoute.PLAYWRIGHT, {"fallback_reason": result.error}
 
     partners_names = [p.name for p in result.partners]
+    logging.warning(f"[AUDIT] Didomi OK : {result.total_partners} partenaires | Dékuple: {result.dekuple_found}")
 
     return AuditRoute.API_DIDOMI, {
         "dekuple_found":      result.dekuple_found,
@@ -140,10 +107,11 @@ async def _route_api_didomi(
 
 
 async def _route_playwright(url: str) -> tuple[AuditRoute, dict]:
-    """Route M3 : navigation Playwright complète."""
+    logging.warning(f"[AUDIT] Route Playwright/fetch pour {url}")
     result: PlaywrightResult = await navigate_and_extract(url)
 
     if not result.success:
+        logging.warning(f"[AUDIT] Navigation échouée : {result.error}")
         return AuditRoute.ECHEC, {
             "error": result.error,
             "dekuple_found": False,
@@ -151,6 +119,7 @@ async def _route_playwright(url: str) -> tuple[AuditRoute, dict]:
 
     screenshots = [s.path for s in result.screenshots]
     text_preview = result.all_text[:500] if result.all_text else ""
+    logging.warning(f"[AUDIT] Navigation OK : Dékuple={result.dekuple_found} | texte={len(result.all_text)} chars | liens={len(result.links_followed)}")
 
     notes = ""
     if not result.dekuple_found:
@@ -175,16 +144,13 @@ async def _route_playwright(url: str) -> tuple[AuditRoute, dict]:
 # ─── Point d'entrée principal ─────────────────────────────────────────────────
 
 async def audit_url(url: str) -> AuditResult:
-    """
-    Audite une URL complète.
-    Orchestre M1 → M2 ou M3 selon le CMP détecté.
-    Retourne un AuditResult unifié.
-    """
-    start = time.time()
+    start      = time.time()
     audited_at = datetime.now().isoformat()
 
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+
+    logging.warning(f"[AUDIT] ━━━ Démarrage audit : {url}")
 
     result = AuditResult(
         url=url,
@@ -194,32 +160,32 @@ async def audit_url(url: str) -> AuditResult:
     )
 
     try:
-        # ── Étape 1 : détection CMP (M1) ──────────────────────────────────
+        # ── Étape 1 : détection CMP ────────────────────────────────────────
+        logging.warning(f"[AUDIT] Étape 1 — Détection CMP : {url}")
         cmp, html = await fetch_and_detect(url)
+        logging.warning(f"[AUDIT] CMP détecté : {cmp.cmp_type.value} | clé API : {cmp.api_key or 'none'}")
+
         result.cmp_type    = cmp.cmp_type.value
         result.cmp_api_key = cmp.api_key
 
         # ── Étape 2 : choix de la route ────────────────────────────────────
-        data   = {}
-        route  = AuditRoute.ECHEC
+        logging.warning(f"[AUDIT] Étape 2 — Choix de route")
+        data  = {}
+        route = AuditRoute.ECHEC
 
         if cmp.cmp_type == CMPType.DIDOMI and cmp.api_endpoint:
             route, data = await _route_api_didomi(cmp, url)
-            # Si l'API a échoué → fallback Playwright
             if route == AuditRoute.PLAYWRIGHT:
                 route, data = await _route_playwright(url)
 
         elif cmp.cmp_type == CMPType.ONETRUST and cmp.api_endpoint:
-            # OneTrust — même logique que Didomi pour l'instant
-            # TODO : implémenter extracteur OneTrust dédié (Module 2b)
             route, data = await _route_playwright(url)
-            result.notes = "OneTrust détecté — analyse via Playwright (API OneTrust à implémenter)"
+            result.notes = "OneTrust détecté — analyse via fetch"
 
         else:
-            # Tous les autres cas : Playwright
             route, data = await _route_playwright(url)
 
-        # ── Étape 3 : remplissage du résultat unifié ───────────────────────
+        # ── Étape 3 : remplissage résultat ─────────────────────────────────
         result.route             = route
         result.dekuple_found     = data.get("dekuple_found", False)
         result.dekuple_name      = data.get("dekuple_name")
@@ -241,13 +207,18 @@ async def audit_url(url: str) -> AuditResult:
             result.error,
             cmp.cmp_type,
         )
+        logging.warning(f"[AUDIT] ✅ Terminé : {url} → {result.status.value} | Dékuple={result.dekuple_found}")
 
     except Exception as e:
+        logging.warning(f"[AUDIT] ❌ EXCEPTION sur {url} : {type(e).__name__} — {e}")
+        import traceback
+        logging.warning(f"[AUDIT] Traceback : {traceback.format_exc()}")
         result.status = AuditStatus.ERREUR
         result.route  = AuditRoute.ECHEC
         result.error  = f"{type(e).__name__} — {e}"
 
     result.duration_seconds = round(time.time() - start, 2)
+    logging.warning(f"[AUDIT] Durée : {result.duration_seconds}s")
     return result
 
 
@@ -256,13 +227,8 @@ async def audit_url(url: str) -> AuditResult:
 async def audit_batch(
     urls: list[str],
     concurrency: int = 5,
-    on_progress=None,       # callback(index, total, result) pour la progression
+    on_progress=None,
 ) -> list[AuditResult]:
-    """
-    Audite une liste d'URLs en parallèle avec contrôle de concurrence.
-    concurrency : nombre d'URLs traitées simultanément (défaut 5).
-    on_progress : callback appelé après chaque URL terminée.
-    """
     semaphore = asyncio.Semaphore(concurrency)
     results   = [None] * len(urls)
     total     = len(urls)
@@ -278,7 +244,6 @@ async def audit_batch(
     await asyncio.gather(*[
         _audit_one(i, url) for i, url in enumerate(urls)
     ])
-
     return results
 
 
@@ -308,8 +273,6 @@ def format_result(r: AuditResult) -> str:
         ]
     if r.partners_total:
         lines.append(f"   Partenaires : {r.partners_total} analysés")
-    if r.screenshots:
-        lines.append(f"   Screenshots : {len(r.screenshots)} captures")
     if r.notes:
         lines.append(f"   Notes       : {r.notes}")
     if r.error:
@@ -336,17 +299,4 @@ def format_batch_summary(results: list[AuditResult]) -> str:
         f"🔴 Erreurs            : {erreurs}",
         "=" * 55,
     ]
-
-    if non_conformes:
-        lines.append("\nURLs NON CONFORMES — action requise :")
-        for r in results:
-            if r.status == AuditStatus.NON_CONFORME:
-                lines.append(f"  ❌ {r.url}")
-
-    if a_verifier:
-        lines.append("\nURLs À VÉRIFIER MANUELLEMENT :")
-        for r in results:
-            if r.status == AuditStatus.A_VERIFIER:
-                lines.append(f"  ⚠️  {r.url} — {r.notes or r.error or ''}")
-
     return "\n".join(lines)
