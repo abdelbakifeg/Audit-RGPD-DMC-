@@ -59,7 +59,7 @@ from modules.report_generator_v2 import generate_outputs, generate_all
 
 DATA_DIR     = Path("data")       # sessions JSON persistées
 OUTPUT_DIR   = Path("outputs")
-STATIC_DIR   = Path("static")     # interface web (Module 7)
+STATIC_DIR   = Path(__file__).parent.parent / "static"    # interface web (Module 7)
 MAX_URLS     = 335                 # limite par session
 MAX_CONCURRENT = 5                 # URLs en parallèle
 SESSION_FILE   = DATA_DIR / "sessions.json"
