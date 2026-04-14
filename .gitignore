@@ -1,0 +1,7 @@
+outputs/
+screenshots/
+data/sessions.json
+__pycache__/
+*.pyc
+.env
+*.zip
